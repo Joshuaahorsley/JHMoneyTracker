@@ -376,21 +376,27 @@ async function bootStore(){
   }
 }
 
-function loadConfig(){const c=sGet('mt:config:v1');if(c)CONFIG=c;}
-function saveConfig(){sSet('mt:config:v1',CONFIG);}
+function loadConfig(m){
+  const c=sGet('mt:config:'+m);
+  if(c){CONFIG=c;return;}
+  const legacy=sGet('mt:config:v1'); // migrate old shared config, or start from defaults
+  CONFIG=JSON.parse(JSON.stringify(legacy||DEFAULT_CONFIG));
+  saveConfig(m);
+}
+function saveConfig(m){sSet('mt:config:'+m,CONFIG);}
 function loadLog(m){LOG=sGet('mt:spend:'+m)||[];}
 function saveLog(m){sSet('mt:spend:'+m,LOG);}
 function loadMonths(){return sGet('mt:months')||[defaultMonthKey()];}
 function saveMonths(l){sSet('mt:months',l);}
 
 function init(){
-  loadConfig();
   let months=loadMonths();
   const dk=defaultMonthKey();
   if(!months.includes(dk)){months.unshift(dk);saveMonths(months);}
   const sel=document.getElementById('month-pick');
   sel.innerHTML=months.map(m=>`<option value="${m}">${m}</option>`).join('')+`<option value="__new">+ New month</option>`;
   sel.value=dk;
+  loadConfig(dk);
   loadLog(dk);
   render();
 }
@@ -405,19 +411,23 @@ function switchMonth(){
     let cand,i=1;
     do{const dd=new Date(latest.getFullYear(),latest.getMonth()+i,1);cand=fmtMonthKey(dd);i++;}while(months.includes(cand)&&i<48);
     months.unshift(cand);saveMonths(months);
+    sSet('mt:config:'+cand,JSON.parse(JSON.stringify(CONFIG))); // new month starts as a copy of the one you were on
     sel.innerHTML=months.map(m=>`<option value="${m}">${m}</option>`).join('')+`<option value="__new">+ New month</option>`;
     sel.value=cand;
   }
-  loadLog(sel.value);render();
+  loadConfig(sel.value);
+  loadLog(sel.value);
+  render();
 }
 
 async function resetAll(){
   const ok=await uiConfirm('Reset everything','This clears every month and all logged spending and restores the default categories \u2014 a completely fresh start. It can\u2019t be undone.','Reset',true);
   if(!ok)return;
-  loadMonths().forEach(m=>sDel('mt:spend:'+m));
+  loadMonths().forEach(m=>{sDel('mt:spend:'+m);sDel('mt:config:'+m);});
+  sDel('mt:config:v1');
   CONFIG=JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-  saveConfig();
   const dk=defaultMonthKey();
+  saveConfig(dk);
   saveMonths([dk]);
   LOG=[];
   const sel=document.getElementById('month-pick');
@@ -436,9 +446,11 @@ async function deleteCurrentMonth(){
   months=months.filter(x=>x!==m);
   saveMonths(months);
   sDel('mt:spend:'+m);
+  sDel('mt:config:'+m);
   const sel=document.getElementById('month-pick');
   sel.innerHTML=months.map(x=>`<option value="${x}">${x}</option>`).join('')+`<option value="__new">+ New month</option>`;
   sel.value=months[0];
+  loadConfig(months[0]);
   loadLog(months[0]);
   render();
 }
@@ -494,7 +506,7 @@ function uiAlert(title,msg){
 
 async function editSalary(){
   const v=await uiPrompt('Net monthly salary','After tax, per month.',CONFIG.salary,'Save');
-  if(v===null)return;const n=parseFloat(v);if(!isNaN(n)&&n>0){CONFIG.salary=n;saveConfig();render();}
+  if(v===null)return;const n=parseFloat(v);if(!isNaN(n)&&n>0){CONFIG.salary=n;saveConfig(curMonth());render();}
 }
 
 function render(){
@@ -622,13 +634,13 @@ function commitEdit(blockId,idx){
   const b=CONFIG.blocks.find(x=>x.id===blockId);
   if(idx===-1)b.items.push({n:nm,a:am});
   else b.items[idx]={n:nm,a:am};
-  editing=null;saveConfig();render();
+  editing=null;saveConfig(curMonth());render();
 }
 async function delItem(blockId,idx){
   const b=CONFIG.blocks.find(x=>x.id===blockId);
   const ok=await uiConfirm('Delete item','Remove \u201c'+b.items[idx].n+'\u201d?','Delete',true);
   if(!ok)return;
-  b.items.splice(idx,1);saveConfig();render();
+  b.items.splice(idx,1);saveConfig(curMonth());render();
 }
 
 function addSpend(){
@@ -651,11 +663,11 @@ document.addEventListener('keydown',e=>{
 });
 
 function exportData(){
-  saveLog(curMonth());
+  saveLog(curMonth());saveConfig(curMonth());
   const months=loadMonths();
-  const data={app:'Joshua Money Tracker',version:1,exportedAt:new Date().toISOString(),
-    config:CONFIG,months:months,spend:{}};
-  months.forEach(m=>{data.spend[m]=sGet('mt:spend:'+m)||[];});
+  const data={app:'Joshua Money Tracker',version:2,exportedAt:new Date().toISOString(),
+    months:months,configs:{},spend:{}};
+  months.forEach(m=>{data.configs[m]=sGet('mt:config:'+m)||CONFIG;data.spend[m]=sGet('mt:spend:'+m)||[];});
   const json=JSON.stringify(data,null,2);
   try{
     const blob=new Blob([json],{type:'application/json'});
@@ -693,18 +705,22 @@ function handleImportFile(input){
   reader.onload=async ()=>{
     try{
       const data=JSON.parse(reader.result);
-      if(!data||!data.config||!Array.isArray(data.config.blocks)){throw new Error('bad');}
+      const legacyOk=data&&data.config&&Array.isArray(data.config.blocks);
+      const newOk=data&&data.configs&&typeof data.configs==='object';
+      if(!legacyOk&&!newOk){throw new Error('bad');}
       const ok=await uiConfirm('Import backup','This replaces the data currently stored with the backup.','Import',true);
       if(!ok){input.value='';return;}
-      await persistSet('mt:config:v1',data.config);
       const months=(Array.isArray(data.months)&&data.months.length)?data.months:[defaultMonthKey()];
-      await persistSet('mt:months',months);
-      STORE['mt:config:v1']=data.config;STORE['mt:months']=months;
-      if(data.spend){for(const m of Object.keys(data.spend)){await persistSet('mt:spend:'+m,data.spend[m]||[]);STORE['mt:spend:'+m]=data.spend[m]||[];}}
-      CONFIG=data.config;
+      await persistSet('mt:months',months);STORE['mt:months']=months;
+      for(const m of months){
+        const cfg=newOk?(data.configs[m]||DEFAULT_CONFIG):data.config; // old backups shared one config
+        await persistSet('mt:config:'+m,cfg);STORE['mt:config:'+m]=cfg;
+        const sp=(data.spend&&data.spend[m])||[];
+        await persistSet('mt:spend:'+m,sp);STORE['mt:spend:'+m]=sp;
+      }
       const sel=document.getElementById('month-pick');
       sel.innerHTML=months.map(x=>`<option value="${x}">${x}</option>`).join('')+`<option value="__new">+ New month</option>`;
-      sel.value=months[0];loadLog(months[0]);render();
+      sel.value=months[0];loadConfig(months[0]);loadLog(months[0]);render();
       await uiAlert('Imported','Your backup is loaded.');
     }catch(e){await uiAlert('Couldn\u2019t import','That file doesn\u2019t look like a Money backup. Nothing was changed.');}
     input.value='';
