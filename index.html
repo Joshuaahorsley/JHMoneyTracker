@@ -183,11 +183,27 @@ body{
 .btn.danger:hover{background:#d83a52}
 @keyframes fade{to{opacity:1}}
 
+/* login gate */
+.gate{position:fixed;inset:0;z-index:100;background:linear-gradient(160deg,#5B6BFF,#3F8BFF);display:none;align-items:center;justify-content:center;padding:24px}
+.gate-card{background:var(--card);border-radius:22px;box-shadow:0 24px 64px rgba(16,23,42,.32);width:100%;max-width:360px;padding:28px 24px 22px;text-align:center;animation:rise .3s cubic-bezier(.2,.7,.2,1) both}
+.gate-logo{width:54px;height:54px;border-radius:16px;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;color:#fff;background:linear-gradient(150deg,#5B6BFF,#3F8BFF)}
+.gate-card h3{margin:0 0 8px;font-size:20px;font-weight:700;letter-spacing:-.4px;color:var(--ink)}
+.gate-card p{margin:0 0 18px;font-size:13.5px;color:var(--ink-2);line-height:1.5}
+.gate-card .fld{width:100%;font-size:16px;margin-bottom:12px;text-align:left}
+.gate-msg{font-size:13px;color:var(--neg);min-height:18px;margin-bottom:6px;line-height:1.4}
+.g-btn{width:100%;padding:13px;font-size:15px;margin-top:2px}
+.gate-alt{font-size:13px;color:var(--ink-2);margin-top:16px}
+.gate-alt a{color:var(--accent-ink);font-weight:600;cursor:pointer;text-decoration:underline}
+.signout{display:none;text-align:center;margin-top:22px}
+.signout a{font-size:13px;color:var(--muted);cursor:pointer;text-decoration:underline}
+@keyframes fade2{to{opacity:1}}
+
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
 }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div class="shell">
@@ -246,6 +262,7 @@ body{
 
   <div class="sec-title">Where it goes</div>
   <div class="cats" id="cats"></div>
+  <div class="signout" id="signout"><a onclick="signOut()">Sign out</a></div>
 </div>
 
 <script>
@@ -303,23 +320,38 @@ function fmtMonthKey(d){return d.toLocaleString('en-GB',{month:'long'})+' '+d.ge
 function curMonth(){const s=document.getElementById('month-pick');return s.value&&s.value!=='__new'?s.value:defaultMonthKey();}
 function gbp(n){return '£'+Number(n).toLocaleString('en-GB',{maximumFractionDigits:n%1===0?0:2});}
 
-/* ---- storage: window.storage (Claude, account-synced) with localStorage fallback ----
-   A synchronous in-memory cache (STORE) backs the rest of the app, so the UI logic
-   stays simple; writes are persisted asynchronously underneath. ---- */
-const HAS_WS = (typeof window!=='undefined' && window.storage && typeof window.storage.get==='function');
+/* ====================================================================
+   SUPABASE SETUP — paste your two values between the quotes below.
+   Find them in your Supabase project: Settings -> API
+   ==================================================================== */
+const SUPABASE_URL = 'https://dtopxbofwmddoajgomns.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR0b3B4Ym9md21kZG9hamdvbW5zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3OTA4NTYsImV4cCI6MjA5ODM2Njg1Nn0.jAM7Ie4j5DgVUjc_7Vc94x1mpeE2ApWmVJVt3kF-nTc';
+/* ==================================================================== */
+
+const SB_CONFIGURED = /^https:\/\//.test(SUPABASE_URL) && SUPABASE_ANON_KEY.length > 20;
+let SB = null;      // supabase client
+let USER = null;    // logged-in user
+function sbReady(){return SB && USER;}
+
+/* ---- storage: Supabase when logged in, localStorage otherwise ----
+   A synchronous in-memory cache (STORE) backs the UI; writes persist
+   asynchronously underneath, so the rest of the app stays simple. ---- */
 const STORE = {};
 
 async function persistGet(k){
-  if(HAS_WS){try{const r=await window.storage.get(k);return (r&&r.value!=null)?JSON.parse(r.value):null;}catch(e){return null;}}
+  if(sbReady()){
+    try{const {data,error}=await SB.from('tracker_data').select('value').eq('key',k).maybeSingle();if(error)throw error;return data?data.value:null;}catch(e){return null;}
+  }
   try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch(e){return null;}
 }
 async function persistSet(k,v){
-  const s=JSON.stringify(v);
-  if(HAS_WS){try{await window.storage.set(k,s);return;}catch(e){}}
-  try{localStorage.setItem(k,s);}catch(e){}
+  if(sbReady()){
+    try{await SB.from('tracker_data').upsert({user_id:USER.id,key:k,value:v,updated_at:new Date().toISOString()},{onConflict:'user_id,key'});return;}catch(e){}
+  }
+  try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}
 }
 async function persistDel(k){
-  if(HAS_WS){try{await window.storage.delete(k);return;}catch(e){}}
+  if(sbReady()){try{await SB.from('tracker_data').delete().eq('key',k);return;}catch(e){}}
   try{localStorage.removeItem(k);}catch(e){}
 }
 
@@ -328,11 +360,20 @@ function sSet(k,v){STORE[k]=v;persistSet(k,v);}
 function sDel(k){delete STORE[k];persistDel(k);}
 
 async function bootStore(){
-  const cfg=await persistGet('mt:config:v1');if(cfg)STORE['mt:config:v1']=cfg;
-  let months=await persistGet('mt:months');
-  if(!months||!months.length)months=[defaultMonthKey()];
-  STORE['mt:months']=months;
-  for(const m of months){STORE['mt:spend:'+m]=(await persistGet('mt:spend:'+m))||[];}
+  for(const key in STORE)delete STORE[key];
+  if(sbReady()){
+    try{
+      const {data,error}=await SB.from('tracker_data').select('key,value');
+      if(!error&&data){data.forEach(r=>{STORE[r.key]=r.value;});}
+    }catch(e){}
+    if(!STORE['mt:months']||!STORE['mt:months'].length)STORE['mt:months']=[defaultMonthKey()];
+  }else{
+    const cfg=await persistGet('mt:config:v1');if(cfg)STORE['mt:config:v1']=cfg;
+    let months=await persistGet('mt:months');
+    if(!months||!months.length)months=[defaultMonthKey()];
+    STORE['mt:months']=months;
+    for(const m of months){STORE['mt:spend:'+m]=(await persistGet('mt:spend:'+m))||[];}
+  }
 }
 
 function loadConfig(){const c=sGet('mt:config:v1');if(c)CONFIG=c;}
@@ -671,7 +712,75 @@ function handleImportFile(input){
   reader.readAsText(file);
 }
 
-bootStore().then(init);
+/* ---- startup + auth ---- */
+async function start(){
+  if(SB_CONFIGURED && window.supabase){
+    SB = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const {data:{session}} = await SB.auth.getSession();
+    if(session){USER=session.user;await afterLogin();}
+    else{showGate();}
+  }else{
+    // not configured yet -> run locally so the file still works
+    await bootStore();init();
+  }
+}
+async function afterLogin(){
+  hideGate();
+  document.getElementById('signout').style.display='block';
+  await bootStore();
+  init();
+}
+function showGate(){
+  let g=document.getElementById('gate');
+  if(!g){
+    g=document.createElement('div');g.id='gate';g.className='gate';
+    g.innerHTML=`<div class="gate-card">
+      <div class="gate-logo">£</div>
+      <h3>Your Money Tracker</h3>
+      <p>Sign in to load your data on this device. Use the same email and password on your phone and Mac to keep them in sync.</p>
+      <input class="fld" id="g-email" type="email" autocomplete="username" placeholder="Email" />
+      <input class="fld" id="g-pass" type="password" autocomplete="current-password" placeholder="Password (6+ characters)" />
+      <div id="g-msg" class="gate-msg"></div>
+      <button class="btn primary g-btn" id="g-go">Sign in</button>
+      <div class="gate-alt">First time here? <a id="g-toggle">Create your account</a></div>
+    </div>`;
+    document.body.appendChild(g);
+    let mode='in';
+    const msg=t=>{g.querySelector('#g-msg').textContent=t||'';};
+    g.querySelector('#g-toggle').onclick=()=>{
+      mode=mode==='in'?'up':'in';
+      g.querySelector('#g-go').textContent=mode==='in'?'Sign in':'Create account';
+      g.querySelector('#g-toggle').textContent=mode==='in'?'Create your account':'Back to sign in';
+      g.querySelector('.gate-alt').firstChild.textContent=mode==='in'?'First time here? ':'Already have an account? ';
+      msg('');
+    };
+    const submit=async()=>{
+      const email=g.querySelector('#g-email').value.trim();
+      const pass=g.querySelector('#g-pass').value;
+      if(!email||pass.length<6){msg('Enter your email and a password of 6+ characters.');return;}
+      const btn=g.querySelector('#g-go');btn.disabled=true;btn.textContent='Please wait\u2026';
+      try{
+        let res;
+        if(mode==='up')res=await SB.auth.signUp({email,password:pass});
+        else res=await SB.auth.signInWithPassword({email,password:pass});
+        if(res.error)throw res.error;
+        const session=res.data.session;
+        if(!session){msg('Account created \u2014 now tap Sign in.');mode='in';btn.disabled=false;btn.textContent='Sign in';return;}
+        USER=session.user;await afterLogin();
+      }catch(e){
+        msg((e&&e.message)?e.message:'Something went wrong. Try again.');
+        btn.disabled=false;btn.textContent=mode==='in'?'Sign in':'Create account';
+      }
+    };
+    g.querySelector('#g-go').onclick=submit;
+    g.addEventListener('keydown',e=>{if(e.key==='Enter')submit();});
+  }
+  g.style.display='flex';
+}
+function hideGate(){const g=document.getElementById('gate');if(g)g.style.display='none';}
+async function signOut(){if(SB){try{await SB.auth.signOut();}catch(e){}}location.reload();}
+
+start();
 </script>
 </body>
 </html>
